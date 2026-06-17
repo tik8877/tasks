@@ -19,34 +19,22 @@ jobs:
           POSTGRES_USER: kubsu
           POSTGRES_PASSWORD: kubsu
         options: >-
-          --health-cmd="pg_isready -h localhost -U kubsu"
+          --health-cmd="pg_isready -U kubsu"
           --health-interval=10s
           --health-timeout=5s
           --health-retries=5
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build test image
+      - name: Build TEST image
         uses: docker/build-push-action@v5
         with:
           context: ./docker
           file: ./docker/Dockerfile
           target: test
-          tags: kubsu/python-crud:test
+          tags: kubsu-crud:test
           load: true
-
-      - name: Wait for Postgres
-        run: |
-          echo "Waiting for Postgres..."
-          for i in {1..30}; do
-            (echo > /dev/tcp/127.0.0.1/5432) >/dev/null 2>&1 && break
-            sleep 1
-          done
 
       - name: Run tests
         env:
@@ -54,7 +42,7 @@ jobs:
         run: |
           docker run --rm --network host \
             -e DATABASE_URL="$DATABASE_URL" \
-            kubsu/python-crud:test
+            kubsu-crud:test
 
 
   deploy:
@@ -62,19 +50,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to Docker Hub
+      - name: Login Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push runtime image
+      - name: Build & Push runtime image
         uses: docker/build-push-action@v5
         with:
           context: ./docker
@@ -83,22 +67,15 @@ jobs:
           push: true
           tags: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/kubsu-crud:latest
 
-      - name: Check SSH connectivity
-        run: |
-          echo "SSH target: ${{ secrets.REMOTE_SSH_HOST }}:${{ secrets.REMOTE_SSH_PORT }}"
-
-          timeout 10 bash -c \
-          'cat < /dev/null > /dev/tcp/${{ secrets.REMOTE_SSH_HOST }}/${{ secrets.REMOTE_SSH_PORT }}' \
-          && echo "SSH reachable" \
-          || echo "SSH NOT reachable (warning, continue)"
-
-      - name: Deploy to server
+      # ❗ ВАЖНО: без TCP check (он ломал pipeline)
+      - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.REMOTE_SSH_HOST }}
+          host: kubsu.tyvik.ru
           port: ${{ secrets.REMOTE_SSH_PORT }}
           username: ${{ secrets.REMOTE_SSH_USER }}
           key: ${{ secrets.REMOTE_SSH_PRIVATE_KEY }}
+          command_timeout: 10m
           script: |
             set -e
 
@@ -108,19 +85,15 @@ jobs:
 
             podman network create kubsu-net || true
 
-            echo "Stopping old containers..."
             podman stop kubsu-db || true
             podman rm kubsu-db || true
             podman stop kubsu-crud || true
             podman rm kubsu-crud || true
 
-            echo "Login to Docker Hub"
             podman login docker.io -u ${{ secrets.DOCKERHUB_USERNAME }} -p ${{ secrets.DOCKERHUB_TOKEN }}
 
-            echo "Pull image"
             podman pull docker.io/${{ secrets.DOCKERHUB_USERNAME }}/kubsu-crud:latest
 
-            echo "Start database"
             podman run -d \
               --name kubsu-db \
               --network kubsu-net \
@@ -129,10 +102,8 @@ jobs:
               -e POSTGRES_PASSWORD=kubsu \
               postgres:15-alpine
 
-            echo "Wait DB..."
             until podman exec kubsu-db pg_isready -U kubsu >/dev/null 2>&1; do sleep 1; done
 
-            echo "Start app"
             podman run -d \
               --name kubsu-crud \
               --network kubsu-net \
