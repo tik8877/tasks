@@ -52,7 +52,7 @@ jobs:
   deploy:
     needs: test
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && secrets.DOCKERHUB_USERNAME != '' && secrets.REMOTE_SSH_HOST != ''
+  
 
     steps:
       - name: Checkout code
@@ -89,21 +89,22 @@ jobs:
           username: ${{ secrets.REMOTE_SSH_USER }}
           key: ${{ secrets.REMOTE_SSH_PRIVATE_KEY }}
           script: |
-            # Используем podman как docker (если установлен alias)
-            command -v docker >/dev/null || alias docker=podman
-            docker network create kubsu-net || true
-            docker stop kubsu-db || true
-            docker rm kubsu-db || true
-            docker stop kubsu-crud || true
-            docker rm kubsu-crud || true
-            docker pull docker.io/${{ secrets.DOCKERHUB_USERNAME }}/kubsu-crud:latest
-            docker run -d --name kubsu-db --network kubsu-net \
+            command -v podman >/dev/null || { echo 'podman is not installed'; exit 1; }
+
+            podman network create kubsu-net || true
+            podman stop kubsu-db || true
+            podman rm kubsu-db || true
+            podman stop kubsu-crud || true
+            podman rm kubsu-crud || true
+            podman login docker.io -u ${{ secrets.DOCKERHUB_USERNAME }} -p ${{ secrets.DOCKERHUB_TOKEN }}
+            podman pull docker.io/${{ secrets.DOCKERHUB_USERNAME }}/kubsu-crud:latest
+            podman run -d --name kubsu-db --network kubsu-net \
               -e POSTGRES_DB=kubsu \
               -e POSTGRES_USER=kubsu \
               -e POSTGRES_PASSWORD=kubsu \
               postgres:15-alpine
-            until docker exec kubsu-db pg_isready -U kubsu >/dev/null 2>&1; do sleep 1; done
-            docker run -d --name kubsu-crud --network kubsu-net -p 8120:8120 --restart unless-stopped \
+            until podman exec kubsu-db pg_isready -U kubsu >/dev/null 2>&1; do sleep 1; done
+            podman run -d --name kubsu-crud --network kubsu-net -p 8120:8120 --restart unless-stopped \
               -e PORT=8120 \
               -e DATABASE_URL=postgresql+psycopg://kubsu:kubsu@kubsu-db:5432/kubsu \
               docker.io/${{ secrets.DOCKERHUB_USERNAME }}/kubsu-crud:latest
