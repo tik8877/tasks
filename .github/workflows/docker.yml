@@ -2,7 +2,7 @@ name: Docker CI/CD
 
 on:
   push:
-    branches: ["main","master"]
+    branches: ["main"]
   workflow_dispatch:
 
 jobs:
@@ -17,8 +17,8 @@ jobs:
           POSTGRES_DB: kubsu
           POSTGRES_USER: kubsu
           POSTGRES_PASSWORD: kubsu
-        options: >-
-          --health-cmd pg_isready -U kubsu
+        options: |
+          --health-cmd "pg_isready -U kubsu"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
@@ -34,14 +34,14 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: ./docker
-          file: ./Dockerfile
+          file: ./docker/Dockerfile
           target: test
           tags: kubsu/python-crud:test
           load: true
 
       - name: Run tests inside built image
         env:
-          DATABASE_URL: postgresql+psycopg://kubsu:kubsu@127.0.0.1:5432/kubsu
+          DATABASE_URL: postgresql+psycopg://kubsu:kubsu@localhost:5432/kubsu
         run: |
           docker run --rm --network host \
             -e DATABASE_URL="$DATABASE_URL" \
@@ -68,7 +68,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: ./docker
-          file: ./Dockerfile
+          file: ./docker/Dockerfile
           target: runtime
           push: true
           tags: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/kubsu-crud:latest
