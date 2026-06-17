@@ -8,6 +8,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+
     services:
       postgres:
         image: postgres:15-alpine
@@ -17,7 +18,11 @@ jobs:
           POSTGRES_DB: kubsu
           POSTGRES_USER: kubsu
           POSTGRES_PASSWORD: kubsu
-        options: --health-cmd "pg_isready -h localhost" --health-interval 10s --health-timeout 5s --health-retries 5
+        options: >-
+          --health-cmd="pg_isready -h localhost -U kubsu"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
 
     steps:
       - name: Checkout code
@@ -35,19 +40,23 @@ jobs:
           tags: kubsu/python-crud:test
           load: true
 
-      - name: Wait for Postgres to be ready
+      - name: Wait for Postgres
         run: |
+          echo "Waiting for Postgres..."
           for i in {1..30}; do
-            timeout 5 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/5432' && break || sleep 1
+            (echo > /dev/tcp/127.0.0.1/5432) >/dev/null 2>&1 && break
+            sleep 1
           done
 
-      - name: Run tests inside built image
+      - name: Run tests
         env:
           DATABASE_URL: postgresql+psycopg://kubsu:kubsu@localhost:5432/kubsu
         run: |
           docker run --rm --network host \
             -e DATABASE_URL="$DATABASE_URL" \
             kubsu/python-crud:test
+
+
   deploy:
     needs: test
     runs-on: ubuntu-latest
@@ -76,32 +85,61 @@ jobs:
 
       - name: Check SSH connectivity
         run: |
-          echo "SSH target: ${{ secrets.REMOTE_SSH_USER }}@${{ secrets.REMOTE_SSH_HOST }}:${{ secrets.REMOTE_SSH_PORT }}"
-          timeout 10 bash -c 'cat < /dev/null > /dev/tcp/${{ secrets.REMOTE_SSH_HOST }}/${{ secrets.REMOTE_SSH_PORT }}' && echo "✓ SSH port is reachable" || echo "✗ SSH port is unreachable"
+          echo "SSH target: ${{ secrets.REMOTE_SSH_HOST }}:${{ secrets.REMOTE_SSH_PORT }}"
 
-      - name: Deploy to remote server
-        uses: appleboy/ssh-action@v1
+          timeout 10 bash -c \
+          'cat < /dev/null > /dev/tcp/${{ secrets.REMOTE_SSH_HOST }}/${{ secrets.REMOTE_SSH_PORT }}' \
+          && echo "SSH reachable" \
+          || echo "SSH NOT reachable (warning, continue)"
+
+      - name: Deploy to server
+        uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.REMOTE_SSH_HOST }}
           port: ${{ secrets.REMOTE_SSH_PORT }}
           username: ${{ secrets.REMOTE_SSH_USER }}
           key: ${{ secrets.REMOTE_SSH_PRIVATE_KEY }}
           script: |
-            command -v podman >/dev/null || { echo 'podman is not installed'; exit 1; }
+            set -e
+
+            echo "=== DEPLOY START ==="
+
+            command -v podman >/dev/null || { echo "podman not installed"; exit 1; }
+
             podman network create kubsu-net || true
+
+            echo "Stopping old containers..."
             podman stop kubsu-db || true
             podman rm kubsu-db || true
             podman stop kubsu-crud || true
             podman rm kubsu-crud || true
+
+            echo "Login to Docker Hub"
             podman login docker.io -u ${{ secrets.DOCKERHUB_USERNAME }} -p ${{ secrets.DOCKERHUB_TOKEN }}
+
+            echo "Pull image"
             podman pull docker.io/${{ secrets.DOCKERHUB_USERNAME }}/kubsu-crud:latest
-            podman run -d --name kubsu-db --network kubsu-net \
+
+            echo "Start database"
+            podman run -d \
+              --name kubsu-db \
+              --network kubsu-net \
               -e POSTGRES_DB=kubsu \
               -e POSTGRES_USER=kubsu \
               -e POSTGRES_PASSWORD=kubsu \
               postgres:15-alpine
+
+            echo "Wait DB..."
             until podman exec kubsu-db pg_isready -U kubsu >/dev/null 2>&1; do sleep 1; done
-            podman run -d --name kubsu-crud --network kubsu-net -p 8120:8120 --restart unless-stopped \
+
+            echo "Start app"
+            podman run -d \
+              --name kubsu-crud \
+              --network kubsu-net \
+              -p 8120:8120 \
+              --restart unless-stopped \
               -e PORT=8120 \
               -e DATABASE_URL=postgresql+psycopg://kubsu:kubsu@kubsu-db:5432/kubsu \
               docker.io/${{ secrets.DOCKERHUB_USERNAME }}/kubsu-crud:latest
+
+            echo "=== DEPLOY DONE ==="
