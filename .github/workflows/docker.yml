@@ -114,3 +114,4 @@ jobs:
               docker.io/${{ secrets.DOCKERHUB_USERNAME }}/kubsu-crud:latest
 
             echo "=== DEPLOY DONE ==="
+
