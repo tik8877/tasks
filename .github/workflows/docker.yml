@@ -13,6 +13,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Clean up disk space
+        run: |
+          echo "=== Checking disk space before cleanup ==="
+          df -h /
+          echo "=== Cleaning up ==="
+          podman system prune -f || true
+          podman image prune -f || true
+          podman container prune -f || true
+          echo "=== Disk space after cleanup ==="
+          df -h /
+
       - name: Create test network
         run: |
           podman network create test-net || true
@@ -29,8 +40,13 @@ jobs:
             -e POSTGRES_PASSWORD=kubsu \
             postgres:15-alpine
 
-          until podman exec test-db pg_isready -U kubsu >/dev/null 2>&1
-          do
+          echo "Waiting for PostgreSQL to be ready..."
+          for i in {1..30}; do
+            if podman exec test-db pg_isready -U kubsu >/dev/null 2>&1; then
+              echo "PostgreSQL is ready!"
+              break
+            fi
+            echo "Waiting... ($i/30)"
             sleep 1
           done
 
@@ -52,6 +68,7 @@ jobs:
         if: always()
         run: |
           podman rm -f test-db || true
+          podman image rm -f kubsu/python-crud:test || true
 
   deploy:
     needs: test
@@ -60,6 +77,17 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Clean up disk space before deploy
+        run: |
+          echo "=== Checking disk space before cleanup ==="
+          df -h /
+          echo "=== Cleaning up old containers and images ==="
+          podman container prune -f || true
+          podman image prune -f || true
+          podman system prune -f || true
+          echo "=== Disk space after cleanup ==="
+          df -h /
 
       - name: Login to Docker Hub
         run: |
@@ -81,11 +109,14 @@ jobs:
 
       - name: Deploy application
         run: |
+          echo "=== Creating network ==="
           podman network create kubsu-net || true
 
+          echo "=== Removing old containers ==="
           podman rm -f kubsu-db || true
           podman rm -f kubsu-crud || true
 
+          echo "=== Starting PostgreSQL ==="
           podman run -d \
             --name kubsu-db \
             --network kubsu-net \
@@ -94,11 +125,17 @@ jobs:
             -e POSTGRES_PASSWORD=kubsu \
             postgres:15-alpine
 
-          until podman exec kubsu-db pg_isready -U kubsu >/dev/null 2>&1
-          do
+          echo "=== Waiting for PostgreSQL to be ready ==="
+          for i in {1..30}; do
+            if podman exec kubsu-db pg_isready -U kubsu >/dev/null 2>&1; then
+              echo "PostgreSQL is ready!"
+              break
+            fi
+            echo "Waiting... ($i/30)"
             sleep 1
           done
 
+          echo "=== Starting application ==="
           podman run -d \
             --name kubsu-crud \
             --network kubsu-net \
@@ -107,3 +144,64 @@ jobs:
             -e PORT=8120 \
             -e DATABASE_URL=postgresql+psycopg://kubsu:kubsu@kubsu-db:5432/kubsu \
             docker.io/${{ secrets.DOCKERHUB_USERNAME }}/kubsu-crud:latest
+
+      - name: Verify deployment
+        run: |
+          echo "=== Waiting for application to start ==="
+          sleep 5
+          echo "=== Container status ==="
+          podman ps -a
+          echo "=== Application logs ==="
+          podman logs --tail 50 kubsu-crud || true
+          echo "=== Database logs ==="
+          podman logs --tail 20 kubsu-db || true
+          echo "=== Testing application connectivity ==="
+          for i in {1..10}; do
+            if curl -s -o /dev/null -w "%{http_code}" http://localhost:8120/ | grep -q "200\|404"; then
+              echo "✅ Application is responding!"
+              break
+            fi
+            echo "Waiting for application to respond... ($i/10)"
+            sleep 2
+          done
+          echo "=== Testing API endpoints ==="
+          echo "GET /users/ response:"
+          curl -s http://localhost:8120/users/ | head -c 200 || echo "No response"
+          echo -e "\n\n=== Deployment verification completed ==="
+
+      - name: Health check (optional)
+        if: always()
+        run: |
+          echo "=== Running health checks ==="
+          # Проверка статуса контейнеров
+          if podman ps | grep -q kubsu-crud; then
+            echo "✅ kubsu-crud container is running"
+          else
+            echo "❌ kubsu-crud container is not running"
+            echo "Last logs:"
+            podman logs --tail 30 kubsu-crud || true
+            exit 1
+          fi
+          if podman ps | grep -q kubsu-db; then
+            echo "✅ kubsu-db container is running"
+          else
+            echo "❌ kubsu-db container is not running"
+            exit 1
+          fi
+          # Проверка доступности приложения
+          if curl -s -f http://localhost:8120/users/ > /dev/null; then
+            echo "✅ Application is accessible on port 8120"
+          else
+            echo "❌ Application is not accessible on port 8120"
+            exit 1
+          fi
+          echo "=== All health checks passed ==="
+
+      - name: Cleanup old images (keep disk clean)
+        if: always()
+        run: |
+          echo "=== Final cleanup ==="
+          podman image prune -f || true
+          podman container prune -f || true
+          echo "=== Disk space after deployment ==="
+          df -h /
