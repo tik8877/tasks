@@ -144,7 +144,6 @@ jobs:
             --network-alias kubsu-crud \
             -p 8120:8120 \
             --restart unless-stopped \
-            --add-host kubsu-db:$(podman inspect -f '{{.NetworkSettings.Networks.kubsu-net.IPAddress}}' kubsu-db) \
             -e PORT=8120 \
             -e DATABASE_URL=postgresql+psycopg://kubsu:kubsu@kubsu-db:5432/kubsu \
             docker.io/${{ secrets.DOCKERHUB_USERNAME }}/kubsu-crud:latest
@@ -153,95 +152,74 @@ jobs:
         run: |
           echo "=== Waiting for application to start ==="
           sleep 10
-          
+
           echo "=== Container status ==="
           podman ps -a
-          
-          echo "=== Network information ==="
-          podman network inspect kubsu-net
-          
+
           echo "=== Application logs ==="
           podman logs --tail 50 kubsu-crud || true
-          
+
           echo "=== Database logs ==="
           podman logs --tail 20 kubsu-db || true
-          
+
           echo "=== Testing DNS resolution from container ==="
           podman exec kubsu-crud ping -c 2 kubsu-db || true
-          podman exec kubsu-crud nslookup kubsu-db || true
-          
-          echo "=== Testing database connection from container ==="
-          podman exec kubsu-crud python -c "
-import asyncpg
-import asyncio
-async def test():
-    try:
-        conn = await asyncpg.connect('postgresql://kubsu:kubsu@kubsu-db:5432/kubsu')
-        result = await conn.fetch('SELECT 1')
-        print('✅ Database connection successful:', result)
-        await conn.close()
-        return True
-    except Exception as e:
-        print('❌ Database connection failed:', e)
-        return False
-asyncio.run(test())
-" || true
-          
+
           echo "=== Testing application connectivity ==="
           for i in {1..15}; do
             if curl -s -o /dev/null -w "%{http_code}" http://localhost:8120/users/ | grep -q "200\|404"; then
-              echo "✅ Application is responding!"
+              echo "Application is responding!"
               break
             fi
             echo "Waiting for application to respond... ($i/15)"
             sleep 2
           done
-          
+
           echo "=== Testing API endpoints ==="
           echo "GET /users/ response:"
           curl -s http://localhost:8120/users/ | head -c 200 || echo "No response"
-          
-          echo -e "\n\n=== Creating test user ==="
+
+          echo ""
+          echo "=== Creating test user ==="
           curl -X POST http://localhost:8120/users/ \
             -H "Content-Type: application/json" \
             -d '{"name": "Test User"}' || echo "Failed to create user"
-          
-          echo -e "\n\n=== Deployment verification completed ==="
+
+          echo ""
+          echo "=== Deployment verification completed ==="
 
       - name: Health check
         if: always()
         run: |
           echo "=== Running health checks ==="
-          
-          # Проверка статуса контейнеров
+
           if podman ps | grep -q kubsu-crud; then
-            echo "✅ kubsu-crud container is running"
+            echo "kubsu-crud container is running"
           else
-            echo "❌ kubsu-crud container is not running"
+            echo "kubsu-crud container is not running"
             echo "Last logs:"
             podman logs --tail 30 kubsu-crud || true
             exit 1
           fi
-          
+
           if podman ps | grep -q kubsu-db; then
-            echo "✅ kubsu-db container is running"
+            echo "kubsu-db container is running"
           else
-            echo "❌ kubsu-db container is not running"
+            echo "kubsu-db container is not running"
             exit 1
           fi
-          
-          # Проверка доступности приложения
+
           HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8120/users/)
           if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "404" ]; then
-            echo "✅ Application is accessible on port 8120 (HTTP $HTTP_CODE)"
+            echo "Application is accessible on port 8120 (HTTP $HTTP_CODE)"
           else
-            echo "❌ Application is not accessible on port 8120 (HTTP $HTTP_CODE)"
+            echo "Application is not accessible on port 8120 (HTTP $HTTP_CODE)"
             exit 1
           fi
-          
+
           echo "=== All health checks passed ==="
 
-      - name: Cleanup old images (keep disk clean)
+      - name: Cleanup old images
         if: always()
         run: |
           echo "=== Final cleanup ==="
