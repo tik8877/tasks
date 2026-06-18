@@ -24,9 +24,13 @@ jobs:
           echo "=== Disk space after cleanup ==="
           df -h /
 
-      - name: Create test network
+      - name: Reset podman network state
         run: |
-          podman network create test-net || true
+          echo "=== Resetting podman network state ==="
+          pkill -f aardvark-dns || true
+          pkill -f netavark || true
+          podman network rm -f test-net || true
+          podman network create test-net
 
       - name: Start PostgreSQL
         run: |
@@ -60,9 +64,12 @@ jobs:
 
       - name: Run tests
         run: |
+          # Используем IP вместо hostname — обход проблемы aardvark-dns в rootless Podman
+          DB_IP=$(podman inspect test-db --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+          echo "Test DB IP: $DB_IP"
           podman run --rm \
             --network test-net \
-            -e DATABASE_URL=postgresql+psycopg://kubsu:kubsu@test-db:5432/kubsu \
+            -e DATABASE_URL="postgresql+psycopg://kubsu:kubsu@${DB_IP}:5432/kubsu" \
             kubsu/python-crud:test
 
       - name: Cleanup
@@ -110,8 +117,13 @@ jobs:
 
       - name: Deploy application
         run: |
-          echo "=== Creating network ==="
-          podman network create kubsu-net || true
+          echo "=== Resetting podman network state ==="
+          pkill -f aardvark-dns || true
+          pkill -f netavark || true
+
+          echo "=== Recreating network ==="
+          podman network rm -f kubsu-net || true
+          podman network create kubsu-net
 
           echo "=== Removing old containers ==="
           podman rm -f kubsu-db || true
@@ -137,6 +149,10 @@ jobs:
             sleep 1
           done
 
+          echo "=== Getting DB container IP (bypass DNS issues) ==="
+          DB_IP=$(podman inspect kubsu-db --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+          echo "DB IP: $DB_IP"
+
           echo "=== Starting application ==="
           podman run -d \
             --name kubsu-crud \
@@ -145,7 +161,7 @@ jobs:
             -p 8120:8120 \
             --restart unless-stopped \
             -e PORT=8120 \
-            -e DATABASE_URL=postgresql+psycopg://kubsu:kubsu@kubsu-db:5432/kubsu \
+            -e DATABASE_URL="postgresql+psycopg://kubsu:kubsu@${DB_IP}:5432/kubsu" \
             docker.io/${{ secrets.DOCKERHUB_USERNAME }}/kubsu-crud:latest
 
       - name: Verify deployment
@@ -162,16 +178,26 @@ jobs:
           echo "=== Database logs ==="
           podman logs --tail 20 kubsu-db || true
 
-          echo "=== Testing DNS resolution from container ==="
-          podman exec kubsu-crud ping -c 2 kubsu-db || true
+          echo "=== Testing connectivity from app container ==="
+          DB_IP=$(podman inspect kubsu-db --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+          podman exec kubsu-crud python -c "
+          import socket
+          try:
+              s = socket.create_connection(('${DB_IP}', 5432), timeout=5)
+              s.close()
+              print('✅ Connection to DB on ${DB_IP}:5432 OK')
+          except Exception as e:
+              print(f'❌ Connection failed: {e}')
+          " || true
 
           echo "=== Testing application connectivity ==="
           for i in {1..15}; do
-            if curl -s -o /dev/null -w "%{http_code}" http://localhost:8120/users/ | grep -q "200\|404"; then
-              echo "Application is responding!"
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8120/users/ 2>/dev/null || echo "000")
+            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "404" ]; then
+              echo "Application is responding! (HTTP $HTTP_CODE)"
               break
             fi
-            echo "Waiting for application to respond... ($i/15)"
+            echo "Waiting for application to respond... ($i/15) - HTTP $HTTP_CODE"
             sleep 2
           done
 
@@ -181,7 +207,7 @@ jobs:
 
           echo ""
           echo "=== Creating test user ==="
-          curl -X POST http://localhost:8120/users/ \
+          curl -s -X POST http://localhost:8120/users/ \
             -H "Content-Type: application/json" \
             -d '{"name": "Test User"}' || echo "Failed to create user"
 
@@ -209,7 +235,7 @@ jobs:
             exit 1
           fi
 
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8120/users/)
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8120/users/ 2>/dev/null || echo "000")
           if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "404" ]; then
             echo "Application is accessible on port 8120 (HTTP $HTTP_CODE)"
           else
