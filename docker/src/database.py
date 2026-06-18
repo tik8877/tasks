@@ -5,7 +5,6 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "postgresql+psycopg://kubsu:kubsu@127.0.0.1:5432/kubsu",
-    "postgresql+psycopg://kubsu:kubsu@kubsu-db:5432/kubsu"
 )
 
 engine = create_async_engine(
